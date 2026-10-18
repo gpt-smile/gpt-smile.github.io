@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPT-smile</title>
+<style>
+  :root {
+    --bg: #fffdf7; --panel: #ffffff; --text: #26231c; --muted: #7a7466;
+    --accent: #f5a623; --accent-text: #2b1d00; --user: #fff1d0; --ai: #eef3ee; --border: #e6e0d0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1a17; --panel: #24221e; --text: #efe9da; --muted: #a39d8d;
+      --accent: #f5a623; --accent-text: #2b1d00; --user: #4a3a15; --ai: #2c332c; --border: #3a372f;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; justify-content: center;
+  }
+  main {
+    width: 100%; max-width: 720px; height: 100%;
+    display: flex; flex-direction: column; padding: 16px; gap: 12px;
+  }
+  h1 { margin: 0; font-size: 1.5rem; }
+  .sub { margin: 2px 0 0; color: var(--muted); font-size: 0.85rem; line-height: 1.4; }
+  #loader { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
+  #loadBtn {
+    background: var(--accent); color: var(--accent-text); border: 0; border-radius: 10px;
+    padding: 10px 16px; font-size: 1rem; font-weight: 600; cursor: pointer;
+  }
+  #loadBtn:disabled { opacity: 0.6; cursor: default; }
+  #bar { height: 8px; background: var(--border); border-radius: 4px; margin-top: 10px; overflow: hidden; display: none; }
+  #barFill { height: 100%; width: 0; background: var(--accent); transition: width 0.2s; }
+  #status { margin-top: 8px; font-size: 0.85rem; color: var(--muted); min-height: 1.2em; }
+  #chat {
+    flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px;
+  }
+  .msg { max-width: 85%; padding: 8px 12px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
+  .user { align-self: flex-end; background: var(--user); }
+  .ai { align-self: flex-start; background: var(--ai); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 999px; padding: 4px 10px; font-size: 0.85rem; cursor: pointer;
+  }
+  form { display: flex; gap: 8px; }
+  input[type=text] {
+    flex: 1; padding: 10px 12px; font-size: 1rem; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--panel); color: var(--text);
+  }
+  #sendBtn {
+    background: var(--accent); color: var(--accent-text); border: 0; border-radius: 10px;
+    padding: 10px 16px; font-size: 1rem; font-weight: 600; cursor: pointer;
+  }
+  #sendBtn:disabled, input:disabled { opacity: 0.5; }
+  footer { color: var(--muted); font-size: 0.75rem; line-height: 1.4; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>GPT-smile</h1>
+    <p class="sub">A tiny English chat model trained from scratch. It runs entirely in your browser &mdash; nothing is sent to a server. It is very small, so it often gets facts wrong.</p>
+  </header>
+
+  <section id="loader">
+    <button id="loadBtn" type="button">Load GPT-smile</button>
+    <div id="bar"><div id="barFill"></div></div>
+    <div id="status">The model downloads once (a few dozen MB) and is cached by your browser.</div>
+  </section>
+
+  <div id="chat" aria-live="polite"></div>
+
+  <div class="chips" id="chips"></div>
+
+  <form id="form" autocomplete="off">
+    <input id="input" type="text" placeholder="Say something in English..." disabled>
+    <button id="sendBtn" type="submit" disabled>Send</button>
+  </form>
+
+  <footer>
+    Each message is answered on its own (no memory of earlier turns). English only.
+  </footer>
+</main>
+
+<script type="module">
+import { pipeline, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.0.1";
+
+// ===== Settings =====================================================
+// A) Model on the Hugging Face Hub (recommended). Replace with your repo name.
+const MODEL_ID = "shumaistudio/gpt-smile-onnx";
+// B) Model files inside this site (only if the .onnx file is under 100 MB):
+//    put them in ./models/gpt-smile/  and set USE_LOCAL = true
+const USE_LOCAL = false;
+const DTYPE = "q8";   // "q8" -> onnx/model_quantized.onnx, "fp32" -> onnx/model.onnx
+const GEN = { max_new_tokens: 100, do_sample: true, temperature: 0.5, top_k: 50, top_p: 0.9, no_repeat_ngram_size: 3 };
+const EXAMPLES = ["Hello!", "What is your name?", "What is a dog?", "I feel sad today.", "What is AI?"];
+// ====================================================================
+
+if (USE_LOCAL) {
+  env.allowRemoteModels = false;
+  env.allowLocalModels = true;
+  env.localModelPath = "./models/";
+}
+
+const $ = (id) => document.getElementById(id);
+const chat = $("chat"), input = $("input"), sendBtn = $("sendBtn"), loadBtn = $("loadBtn");
+let generator = null, busy = false;
+
+function addMsg(text, who) {
+  const div = document.createElement("div");
+  div.className = "msg " + who;
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+function setBusy(v) {
+  busy = v;
+  input.disabled = v || !generator;
+  sendBtn.disabled = v || !generator;
+  if (!v && generator) input.focus();
+}
+
+// ----- Load the model -----
+loadBtn.addEventListener("click", async () => {
+  loadBtn.disabled = true;
+  $("bar").style.display = "block";
+  const files = {};
+  try {
+    generator = await pipeline("text-generation", USE_LOCAL ? "gpt-smile" : MODEL_ID, {
+      dtype: DTYPE,
+      progress_callback: (p) => {
+        if (p.status === "progress" && p.total) {
+          files[p.file] = { loaded: p.loaded, total: p.total };
+          const all = Object.values(files);
+          const loaded = all.reduce((a, f) => a + f.loaded, 0);
+          const total = all.reduce((a, f) => a + f.total, 0);
+          $("barFill").style.width = (100 * loaded / total).toFixed(1) + "%";
+          $("status").textContent = `Downloading... ${(loaded / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB`;
+        }
+      },
+    });
+    $("status").textContent = "Ready! Say hello.";
+    $("barFill").style.width = "100%";
+    loadBtn.style.display = "none";
+    setBusy(false);
+    addMsg("Hi! I am GPT-smile. Ask me something simple.", "ai");
+  } catch (err) {
+    console.error(err);
+    $("status").textContent = "Failed to load the model: " + (err.message || err);
+    loadBtn.disabled = false;
+  }
+});
+
+// ----- Send a message -----
+async function send(question) {
+  if (!generator || busy || !question.trim()) return;
+  setBusy(true);
+  addMsg(question, "user");
+  const pending = addMsg("...", "ai");
+  try {
+    const prompt = `user: ${question.trim()}\nai:`;   // same format as training
+    const out = await generator(prompt, { ...GEN, return_full_text: false });
+    let text = out[0].generated_text;
+    if (text.startsWith(prompt)) text = text.slice(prompt.length);
+    text = text.split("\nuser:")[0].split("user:")[0].trim();
+    pending.textContent = text || "(no answer)";
+  } catch (err) {
+    console.error(err);
+    pending.textContent = "Error: " + (err.message || err);
+  }
+  setBusy(false);
+}
+
+$("form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const q = input.value;
+  input.value = "";
+  send(q);
+});
+
+for (const ex of EXAMPLES) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "chip"; b.textContent = ex;
+  b.addEventListener("click", () => send(ex));
+  $("chips").appendChild(b);
+}
+</script>
+</body>
+</html>
